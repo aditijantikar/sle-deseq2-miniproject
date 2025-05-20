@@ -1,0 +1,195 @@
+---
+title: "Lupus Mini Project"
+format: pdf
+editor: visual
+author: Aditi
+toc: true
+---
+
+## Background
+
+Lupus arises when the immune system, often responsible for safeguarding the body against infections and diseases, erroneously targets its own tissues. This attack induces inflammation and, in certain instances, irreversible tissue damage, potentially impacting several systems, including the skin, joints, heart, lungs, kidneys, circulating blood cells, and brain.
+
+```{r, message=FALSE}
+library(GEOquery)
+library(dplyr)
+library(ggplot2)
+library(DESeq2)
+```
+
+```{r, message=FALSE}
+gse <- getGEO("GSE149050")
+```
+
+Extract metadata for the 'gse' object
+
+```{r}
+#gse list has only one entry
+metadata <- pData(phenoData(gse[[1]]))
+dim(metadata)
+```
+
+## Exploratory Analysis
+
+```{r}
+
+table(metadata$characteristics_ch1)
+```
+
+Q. How many different cell types are there?
+
+```{r}
+table(metadata$characteristics_ch1.2)
+```
+
+Q. How many male and female patients?
+
+```{r}
+table(metadata$characteristics_ch1.7)
+```
+
+Q. Why are few males affected?
+
+Lupus affects women significantly more than men, with a 9:1 female-to-male ratio, and while the exact reasons are still being researched, hormonal differences, particularly estrogen, and genetics are thought to play a role.
+
+Q. Break down of race by gender?
+
+```{r}
+table(metadata$characteristics_ch1.10, metadata$characteristics_ch1.7)
+```
+
+## Setup for DESeq2
+
+```{r}
+metadata.tc <- filter(metadata, characteristics_ch1.2 == "cell type: T cells" & characteristics_ch1.6 == "visit number: 1")
+head(metadata.tc[,1:3])
+```
+
+Q. How were these samples processed (alignment/mapping software version and genome build used)?
+
+```{r}
+metadata.tc$data_processing[1]
+```
+
+```{r}
+metadata.subset <- metadata.tc %>%
+  select(title,
+         disease_state = characteristics_ch1, 
+         ifn_status = characteristics_ch1.3,
+         patient_id = characteristics_ch1.4) %>%
+  mutate(disease_state = gsub("disease state: ","", disease_state)) %>%
+  mutate(ifn_status = gsub("ifn status: ","", ifn_status)) %>%
+  mutate(patient_id = gsub("patientuid: ","", patient_id)) %>%
+  mutate(state = recode(disease_state, 
+                        "healthy control" = "control", 
+                        "systemic lupus erythematosus (SLE)" = "lupus"))
+table(metadata.subset$state)
+```
+
+```{r}
+#Read count data
+counts.all <- read.delim("GSE149050_Bulk_Human_RawCounts.txt.gz",
+                         check.names=FALSE, row.names = 1)
+head(counts.all[,1:3])
+head(metadata.subset$title)
+```
+
+```{r}
+counts.subset <- counts.all %>% select(metadata.subset$title)
+dim(counts.subset)
+```
+
+```{r}
+all(colnames(counts.subset) == metadata.subset$title)
+```
+
+```{r}
+# Remove title column then use it as row names
+colData <- metadata.subset[,-1]
+rownames(colData) <- metadata.subset[,1]
+head(colData)
+```
+
+## Set up DESeq object
+
+```{r deseq_setup, message=FALSE, warning=FALSE}
+dds <- DESeqDataSetFromMatrix(countData = counts.subset, #you already have the matrix
+                              colData = colData,
+                              design = ~state)
+```
+
+```{r}
+keep.inds <- rowSums(counts(dds)) >= 10
+dds <- dds[keep.inds,]
+```
+
+```{r}
+#PCA analysis
+vsd <- vst(dds, blind = FALSE)
+plotPCA(vsd, intgroup = c("state", "ifn_status"))
+```
+
+## Running DESeq2
+
+```{r, message=FALSE}
+dds <- DESeq(dds)
+```
+
+## Extract Results
+
+```{r}
+res <- results(dds) 
+head(res)
+summary(res)
+```
+
+After adjusting p-value threshold
+
+```{r}
+res_p05 <- results(dds, alpha=0.05)
+summary(res_p05)
+```
+
+```{r}
+write.csv(res_p05, "deseq_results_tc_SLE.csv")
+plot(res$log2FoldChange, -log(res$padj))
+
+```
+
+## Vizualizations
+
+```{r}
+mycols <- rep("green", nrow(res))
+mycols[ abs(res$log2FoldChange) > 2] = "blue"
+mycols[ res$padj > 0.05 ] = "red"
+
+plot(res$log2FoldChange, -log(res$padj), ylim=c(0,15), col=mycols)
+abline(v=c(-1,1), lty=2)
+abline(h=-log(0.05), lty=2)
+```
+
+```{r}
+results <- as.data.frame(res)
+
+library(ggplot2)
+
+ggplot(results) +
+  aes(log2FoldChange, -log(padj)) +
+  geom_point(col=mycols) +
+  geom_vline(xintercept = c(-1,+1), linetype=2) +
+  geom_hline(yintercept = -log(0.05), linetype=2)
+```
+
+## Extract top genes
+
+```{r}
+top.genes <- results %>% filter(padj <= 0.05 & abs(log2FoldChange) >= 2)
+head(top.genes)
+```
+
+#Save Results
+
+```{r}
+save(top.genes, file = "top_genes.RData")
+write.csv(res, file="results.csv")
+```
